@@ -70,13 +70,18 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
 def get_yolo_model(model_path):
     from ultralytics import YOLO
     # Load the model.
+    print(f"Loading YOLO model from: {model_path}")
+    print(f"File exists: {os.path.exists(model_path)}")
     model = YOLO(model_path)
+    print("Model loaded successfully")
     return model
 
 
 @torch.inference_mode()
 def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_model_processor, prompt=None, batch_size=32):
     # Number of samples per batch, --> 256 roughly takes 23 GB of GPU memory for florence model
+    if batch_size is None:
+        batch_size = 32  # Default batch size
 
     to_pil = ToPILImage()
     if starting_idx:
@@ -375,38 +380,40 @@ def predict(model, image, caption, box_threshold, text_threshold):
 
 
 def predict_yolo(model, image_path, box_threshold, imgsz, scale_img, iou_threshold=0.7):
-    """ Use huggingface model to replace the original model
-    """
-    # model = model['model']
-    if scale_img:
-        result = model.predict(
-        source=image_path,
-        conf=box_threshold,
-        imgsz=imgsz,
-        iou=iou_threshold, # default 0.7
-        )
-    else:
-        result = model.predict(
-        source=image_path,
-        conf=box_threshold,
-        iou=iou_threshold, # default 0.7
-        )
-    boxes = result[0].boxes.xyxy#.tolist() # in pixel space
-    conf = result[0].boxes.conf
-    phrases = [str(i) for i in range(len(boxes))]
-
-    return boxes, conf, phrases
+    print(f"Running YOLO prediction on {image_path}")
+    print(f"Box threshold: {box_threshold}, IOU threshold: {iou_threshold}")
+    results = model.predict(image_path, imgsz=imgsz, conf=box_threshold, iou=iou_threshold)
+    print(f"YOLO results: {len(results)} predictions")
+    
+    boxes = results[0].boxes
+    print(f"Number of boxes: {len(boxes)}")
+    if len(boxes) == 0:
+        return torch.tensor([]), torch.tensor([]), []
+    
+    xyxy = boxes.xyxy
+    logits = boxes.conf
+    phrases = boxes.cls
+    print(f"Boxes: {xyxy}")
+    print(f"Confidences: {logits}")
+    print(f"Classes: {phrases}")
+    return xyxy, logits, phrases
 
 
 def get_som_labeled_img(img_path, model=None, BOX_TRESHOLD = 0.01, output_coord_in_ratio=False, ocr_bbox=None, text_scale=0.4, text_padding=5, draw_bbox_config=None, caption_model_processor=None, ocr_text=[], use_local_semantics=True, iou_threshold=0.9,prompt=None, scale_img=False, imgsz=None, batch_size=None):
     """ ocr_bbox: list of xyxy format bbox
     """
+    print(f"Processing image: {img_path}")
     image_source = Image.open(img_path).convert("RGB")
     w, h = image_source.size
+    print(f"Image size: {w}x{h}")
     if not imgsz:
         imgsz = (h, w)
-    # print('image size:', w, h)
+    print("Running YOLO prediction...")
     xyxy, logits, phrases = predict_yolo(model=model, image_path=img_path, box_threshold=BOX_TRESHOLD, imgsz=imgsz, scale_img=scale_img, iou_threshold=0.1)
+    print(f"YOLO predictions: {len(xyxy)} boxes found")
+    if len(xyxy) == 0:
+        print("No objects detected by YOLO")
+        return None, None, None
     xyxy = xyxy / torch.Tensor([w, h, w, h]).to(xyxy.device)
     image_source = np.asarray(image_source)
     phrases = [str(i) for i in range(len(phrases))]
@@ -414,23 +421,24 @@ def get_som_labeled_img(img_path, model=None, BOX_TRESHOLD = 0.01, output_coord_
     # annotate the image with labels
     h, w, _ = image_source.shape
     if ocr_bbox:
+        print(f"OCR boxes found: {len(ocr_bbox)}")
         ocr_bbox = torch.tensor(ocr_bbox) / torch.Tensor([w, h, w, h])
         ocr_bbox=ocr_bbox.tolist()
     else:
         print('no ocr bbox!!!')
         ocr_bbox = None
-    # filtered_boxes = remove_overlap(boxes=xyxy, iou_threshold=iou_threshold, ocr_bbox=ocr_bbox)
-    # starting_idx = len(ocr_bbox)
-    # print('len(filtered_boxes):', len(filtered_boxes), starting_idx)
 
     ocr_bbox_elem = [{'type': 'text', 'bbox':box, 'interactivity':False, 'content':txt} for box, txt in zip(ocr_bbox, ocr_text)]
     xyxy_elem = [{'type': 'icon', 'bbox':box, 'interactivity':True, 'content':None} for box in xyxy.tolist()]
+    print(f"Processing {len(xyxy_elem)} YOLO boxes and {len(ocr_bbox_elem)} OCR boxes")
     filtered_boxes = remove_overlap_new(boxes=xyxy_elem, iou_threshold=iou_threshold, ocr_bbox=ocr_bbox_elem)
+    print(f"After filtering: {len(filtered_boxes)} boxes")
     
     # sort the filtered_boxes so that the one with 'content': None is at the end, and get the index of the first 'content': None
     filtered_boxes_elem = sorted(filtered_boxes, key=lambda x: x['content'] is None)
     # get the index of the first 'content': None
     starting_idx = next((i for i, box in enumerate(filtered_boxes_elem) if box['content'] is None), -1)
+    print(f"Starting index for icon processing: {starting_idx}")
     filtered_boxes = torch.tensor([box['bbox'] for box in filtered_boxes_elem])
 
     

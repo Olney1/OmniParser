@@ -6,3 +6,13 @@ weights/icon_detect_v1_5_2/
 .gradio
 __pycache__/
 debug.ipynb
+# All image and pdf files
+*.png
+*.jpg
+*.jpeg
+*.pdf
+.DS_Store
+**/__pycache__/
+*.pyc
+util/__pycache__/__init__.cpython-312.pyc
+util/__pycache__/box_annotator.cpython-312.pyc

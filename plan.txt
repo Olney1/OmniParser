@@ -1,0 +1,173 @@
+Below is a high-level plan and a sample implementation outline showing how you might adapt this repository for extracting and comparing signature regions from PDF documents. You can adjust or expand these steps based on your specific needs. If anything remains unclear about OmniParser or the approach, feel free to ask for more details.
+---
+Plan Overview
+Install and Configure the Environment
+• Follow the instructions in the README.md of this repo to set up conda and install dependencies.
+• Make sure you have a Python version compatible with the repository (the example shows Python 3.12).
+• Install an external PDF-to-image library (e.g., PyMuPDF, pdf2image, or similar) so you can convert PDF pages into images.
+Organize PDF Layout Definitions for Each File Type
+Since you have five main PDF file types ("EERF", "PICI", "PIHC", "PIPS", and "PLID"), create a small Python data structure (e.g., dictionary) that keeps track of how to interpret or handle each PDF. For example, if you already know where the signature fields are in each layout (the bounding boxes, or approximate page location), you can store that in a dictionary for reference.
+Alternatively, you could rely on OmniParser’s detection to find text/icon regions, then post-process or filter them to see if they look like signature fields.
+Convert PDF Pages to Images
+• Use a library such as PyMuPDF (fitz) or pdf2image to convert each page in your PDFs to a separate image file (e.g., PNG).
+• For each PDF file in a specific folder, you will:
+– Identify the PDF type by file naming convention (e.g., if the name starts with “EERF”, treat it as the “EERF” format).
+– Convert each page in that PDF to an image.
+Run OmniParser on Each Image
+• For each page image, call the OmniParser detection functions (following the usage patterns shown in the README and the existing code) to detect elements on the screen.
+• For signature detection:
+– You can either compare the detected bounding boxes against your known "signature field" bounding boxes (for a given PDF layout).
+– Or, if you have a custom prompt or rule for OmniParser's local semantics detection (e.g., searching for keywords like “sign” or “signature” from OCR text), you can filter the detection results that contain that text.
+Aggregate and Compare Across Different PDFs
+• Store the identified signatures for each PDF in a results structure or database.
+• When you have “EERF” and “PICI” and so forth, you can cross-check if a signature (or a bounding box with an identical or near-identical signature snippet) appears in multiple PDFs. If yes, flag it for human-level checks.
+• The matching can be done by text matching from OCR or by comparing bounding box images using an image hashing library—whichever meets your requirements.
+Output the Flags/Report
+• Summarize which PDFs have matching or duplicate signatures.
+• Potentially produce an annotated image (or a PDF) that marks the suspected signature locations.
+---
+Sample Code
+Below is a basic proof-of-concept script. It assumes:
+• You have installed this repo’s dependencies (torch, easyocr, etc.).
+• You have installed PyMuPDF (or some PDF-to-image library) for PDF conversion.
+• You have a function or approach to decide which PDF layout type we’re dealing with (by filename).
+• You have a data structure called “SIGNATURE_FIELDS” for each PDF layout type if needed.
+Adjust as needed.
+        "signature_boxes": [
+)
+Notes and Next Steps
+• You may refine the “signature” detection logic by either:
+– Hard-coding bounding boxes where the signature fields must be found (and checking if something’s detected in those bounding boxes).
+– Or training a specialized model or applying textual filters (e.g., “signature”, “sign”) to the OCR text to ascertain whether a region is likely a signature.
+• After each PDF is processed, you could store the bounding boxes (or extracted image patches) of each signature region. Then compare among different PDF sets to find identical or near-identical signatures as part of your “audit” requirement.
+• The sample code primarily shows how to integrate PDF -> images -> OmniParser detection. You can expand it to address custom data flows or more robust signature matching.
+If you need further details on the limitations of OmniParser, or help customizing the bounding box comparison for signature detection, let me know!
+
+`import os
+import fitz  # PyMuPDF, install via: pip install PyMuPDF
+from PIL import Image
+from utils import get_som_labeled_img, check_ocr_box, get_caption_model_processor, get_yolo_model
+
+# Example placeholders for known signature bounding boxes or detection logic per PDF type
+SIGNATURE_FIELDS = {
+    "EERF": {
+        "page_count": 3,
+        "signature_boxes": [
+            # List of known bounding boxes in (x1, y1, x2, y2) format or ratio
+            # e.g., {(page=1, box=(0.1, 0.2, 0.2, 0.25)), ...}
+        ]
+    },
+    "PICI": {},
+    "PIHC": {},
+    "PIPS": {},
+    "PLID": {},
+}
+
+def get_pdf_layout_type(filename: str) -> str:
+    """
+    Simple function to identify PDF layout by name.
+    For example, if the file starts with 'EERF', we return 'EERF'.
+    Adjust logic as needed.
+    """
+    filename_upper = filename.upper()
+    for layout_type in SIGNATURE_FIELDS.keys():
+        if filename_upper.startswith(layout_type):
+            return layout_type
+    return "UNKNOWN"
+
+def convert_pdf_to_images(input_pdf_path: str, output_folder: str):
+    """
+    Convert each page of the PDF into an image (PNG).
+    Returns a list of image file paths.
+    """
+    doc = fitz.open(input_pdf_path)
+    image_paths = []
+    for page_index in range(len(doc)):
+        page = doc.load_page(page_index)
+        mat = fitz.Matrix(2, 2)  # Increase resolution if needed
+        pix = page.get_pixmap(matrix=mat)
+        image_path = os.path.join(output_folder, f"page_{page_index}.png")
+        pix.save(image_path)
+        image_paths.append(image_path)
+    return image_paths
+
+def analyze_signatures_in_pdf(pdf_path: str, yolo_model, caption_model_processor):
+    """
+    Example pipeline to locate signature regions using OmniParser
+    and optional known bounding boxes in SIGNATURE_FIELDS.
+    """
+    pdf_filename = os.path.basename(pdf_path)
+    pdf_type = get_pdf_layout_type(pdf_filename)
+
+    # Convert PDF pages to images
+    temp_folder = "temp_images"
+    os.makedirs(temp_folder, exist_ok=True)
+    page_image_paths = convert_pdf_to_images(pdf_path, temp_folder)
+
+    # Loop over each page image and run OmniParser
+    all_signature_candidates = []
+    for page_index, img_path in enumerate(page_image_paths):
+        text_bbox_result, _ = check_ocr_box(
+            img_path,
+            display_img=False,
+            output_bb_format='xyxy',
+            goal_filtering=None,
+            easyocr_args={'paragraph': False, 'text_threshold': 0.9},
+            use_paddleocr=False
+        )
+        text_list, ocr_bbox = text_bbox_result
+
+        # Run object (icon) detection & generate annotated image
+        annotated_img_b64, label_coordinates, filtered_boxes_elem = get_som_labeled_img(
+            img_path,
+            yolo_model,
+            BOX_TRESHOLD=0.05,
+            output_coord_in_ratio=False,
+            ocr_bbox=ocr_bbox,
+            draw_bbox_config=None,
+            caption_model_processor=caption_model_processor,
+            ocr_text=text_list,
+            use_local_semantics=True,   # If you want local semantics
+            iou_threshold=0.9,
+            prompt="This is a signature field"  # Or your custom text prompt
+        )
+
+        # Optionally compare with known signature boxes for that PDF layout
+        if pdf_type in SIGNATURE_FIELDS:
+            known_boxes = SIGNATURE_FIELDS[pdf_type].get("signature_boxes", [])
+            # Here you could compare the detected icons/text with known boxes
+            # to see if they match or overlap. This is left as a custom step.
+        
+        # For demonstration, we are just collecting all detected items:
+        all_signature_candidates.extend(filtered_boxes_elem)
+    
+    # Return or store the signature candidates
+    return all_signature_candidates
+
+if __name__ == "__main__":
+    # Load your YOLO model and caption model once
+    yolo_model = get_yolo_model(model_path="weights/icon_detect/best.pt")  
+    # Adjust model_path to your download location
+    caption_model_processor = get_caption_model_processor(
+        model_name="florence2",
+        model_name_or_path="weights/icon_caption_florence"
+    )
+
+    # Process a folder that contains PDFs
+    pdf_folder = "pdf_files"
+    pdf_filenames = [f for f in os.listdir(pdf_folder) if f.lower().endswith(".pdf")]
+
+    # For each PDF in the folder
+    for pdf_name in pdf_filenames:
+        full_pdf_path = os.path.join(pdf_folder, pdf_name)
+        print(f"Processing PDF: {pdf_name}")
+        signature_candidates = analyze_signatures_in_pdf(
+            full_pdf_path,
+            yolo_model,
+            caption_model_processor
+        )
+        # Decide how to cross-check or output results
+        print(f"Found {len(signature_candidates)} signature-like items in {pdf_name}.")`
+
+
+PLEASE NOTE THAT THIS PLAN IS SUBJECT TO CHANGE SO DO NOT FOLLOW IT AS THE ONLY SOURCE OF INFORMATION. I WILL LIKELY MAKE CHANGES AS WE GO BUT THIS IS THE OVERALL INITIAL PLAN. ACCEPT DEVIATIONS AS ADVISED.
